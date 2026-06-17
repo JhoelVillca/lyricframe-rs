@@ -1,19 +1,8 @@
 use askama::Template;
-use axum::{
-    extract::State,
-    http::{header, StatusCode},
-    response::{Html, IntoResponse},
-    routing::get,
-    Router,
-};
 use base64::{engine::general_purpose, Engine as _};
 use color_thief::{get_palette, ColorFormat};
-use dotenvy::var;
 use reqwest::Client;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use vercel_runtime::{run, Error, Request, Response};
 
 struct Barra {
     altura: u32,
@@ -39,21 +28,6 @@ struct WidgetTemplate {
     album: String,
     barras: Vec<Barra>,
 }
-
-struct CachedToken {
-    access_token: String,
-    expires_at: Instant,
-}
-
-struct AppState {
-    http_client: Client,
-    client_id: String,
-    client_secret: String,
-    refresh_token: String,
-    token_cache: RwLock<Option<CachedToken>>,
-}
-
-
 
 // --- LOGICA DE COLOR ---
 fn rgb_a_hex(color: (u8, u8, u8)) -> String {
@@ -102,45 +76,6 @@ fn extraer_paleta_y_fondo(bytes_imagen: &[u8]) -> (Vec<(u8, u8, u8)>, String, St
     (paleta, color_fondo_final, color_texto_contraste)
 }
 
-
-async fn get_access_token(state: &AppState) -> Option<String> {
-    {
-        let cache = state.token_cache.read().await;
-        if let Some(cached) = &*cache {
-            if cached.expires_at > Instant::now() {
-                return Some(cached.access_token.clone());
-            }
-        }
-    } 
-
-    let auth = general_purpose::STANDARD.encode(format!("{}:{}", state.client_id, state.client_secret));
-    let params = [
-        ("grant_type", "refresh_token"),
-        ("refresh_token", &state.refresh_token),
-    ];
-
-    let url_token = "https://accounts.spotify.com/api/token";
-
-    let res = state.http_client.post(url_token)
-        .header("Authorization", format!("Basic {}", auth))
-        .form(&params)
-        .send()
-        .await
-        .ok()?;
-
-    let json: serde_json::Value = res.json().await.ok()?;
-    let new_token = json["access_token"].as_str()?.to_string();
-    let expires_in = json["expires_in"].as_u64().unwrap_or(3600);
-
-    let mut cache = state.token_cache.write().await;
-    *cache = Some(CachedToken {
-        access_token: new_token.clone(),
-        expires_at: Instant::now() + Duration::from_secs(expires_in - 60),
-    });
-
-    Some(new_token)
-}
-
 async fn get_image_data(client: &Client, url: &str) -> (String, Vec<u8>) {
     if url.is_empty() {
         return (String::new(), Vec::new());
@@ -152,15 +87,54 @@ async fn get_image_data(client: &Client, url: &str) -> (String, Vec<u8>) {
     (b64, bytes.to_vec())
 }
 
-async fn renderizar_widget(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, StatusCode> {
-    let token = get_access_token(&state).await.ok_or(StatusCode::UNAUTHORIZED)?;
+async fn handler(_req: Request) -> Result<Response<String>, Error> {
+    if _req.uri().path() == "/favicon.ico" {
+        return Ok(Response::builder()
+            .status(404)
+            .body("Not Found".to_string())?);
+    }
+
+    let client_id = std::env::var("SPOTIFY_CLIENT_ID").unwrap_or_default();
+    let client_secret = std::env::var("SPOTIFY_SECRET_ID").unwrap_or_default();
+    let refresh_token = std::env::var("SPOTIFY_REFRESH_TOKEN").unwrap_or_default();
+    
+    let client = reqwest::Client::new();
+
+    let auth = general_purpose::STANDARD.encode(format!("{}:{}", client_id, client_secret));
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", &refresh_token),
+    ];
+
+    let url_token = "https://accounts.spotify.com/api/token";
+    
+    let res = client.post(url_token)
+        .header("Authorization", format!("Basic {}", auth))
+        .form(&params)
+        .send()
+        .await?;
+
+    let json: serde_json::Value = res.json().await?;
+    println!("DEBUG - SPOTIFY_CLIENT_ID: '{}'", client_id);
+    println!("DEBUG - SPOTIFY_SECRET_ID: '{}'", client_secret);
+    println!("DEBUG - SPOTIFY_REFRESH_TOKEN: '{}'", refresh_token);
+    println!("DEBUG - Spotify Token Response: {}", json);
+
+    let token = json["access_token"].as_str().unwrap_or_default();
+
+    if token.is_empty() {
+        return Ok(Response::builder()
+            .status(401)
+            .body("Fallo al obtener token de Spotify".to_string())?);
+    }
+
     let mut track_data = serde_json::Value::Null;
     let mut is_playing = false;
 
     let url_current = "https://api.spotify.com/v1/me/player/currently-playing";
     let url_recent = "https://api.spotify.com/v1/me/player/recently-played?limit=1";
 
-    if let Ok(res) = state.http_client.get(url_current)
+    if let Ok(res) = client.get(url_current)
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .await 
@@ -174,7 +148,7 @@ async fn renderizar_widget(State(state): State<Arc<AppState>>) -> Result<impl In
     }
 
     if track_data.is_null() {
-        if let Ok(res) = state.http_client.get(url_recent)
+        if let Ok(res) = client.get(url_recent)
             .header("Authorization", format!("Bearer {}", token))
             .send()
             .await 
@@ -188,7 +162,9 @@ async fn renderizar_widget(State(state): State<Arc<AppState>>) -> Result<impl In
     }
 
     if track_data.is_null() {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+        return Ok(Response::builder()
+            .status(503)
+            .body("No se pudo obtener datos de Spotify".to_string())?);
     }
 
     let cancion = track_data["name"].as_str().unwrap_or("Sin conexion").to_string();
@@ -198,7 +174,7 @@ async fn renderizar_widget(State(state): State<Arc<AppState>>) -> Result<impl In
     let url_artista = track_data["artists"][0]["external_urls"]["spotify"].as_str().unwrap_or("").to_string();
     
     let image_url = track_data["album"]["images"][1]["url"].as_str().unwrap_or("");
-    let (imagen_b64, bytes_imagen) = get_image_data(&state.http_client, image_url).await;
+    let (imagen_b64, bytes_imagen) = get_image_data(&client, image_url).await;
 
     let (paleta, color_fondo_final, color_texto_contraste) = extraer_paleta_y_fondo(&bytes_imagen);
 
@@ -228,40 +204,17 @@ async fn renderizar_widget(State(state): State<Arc<AppState>>) -> Result<impl In
         barras,
     };
 
-    let renderizado = template.render().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let renderizado = template.render().unwrap_or_default();
 
-    Ok((
-        [
-            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
-            (header::PRAGMA, "no-cache"),
-            (header::EXPIRES, "0"),
-        ],
-        Html(renderizado),
-    ))
+    Ok(Response::builder()
+        .status(200)
+        .header("Content-Type", "image/svg+xml; charset=utf-8")
+        .header("Cache-Control", "s-maxage=60, stale-while-revalidate=30")
+        .body(renderizado)?)
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Error> {
     dotenvy::dotenv().ok();
-
-    let client_id = var("SPOTIFY_CLIENT_ID").expect("Falta SPOTIFY_CLIENT_ID en el .env");
-    let client_secret = var("SPOTIFY_SECRET_ID").expect("Falta SPOTIFY_SECRET_ID en el .env");
-    let refresh_token = var("SPOTIFY_REFRESH_TOKEN").expect("Falta SPOTIFY_REFRESH_TOKEN en el .env");
-
-    let state = Arc::new(AppState {
-        http_client: Client::new(),
-        client_id,
-        client_secret,
-        refresh_token,
-        token_cache: RwLock::new(None),
-    });
-
-    let app = Router::new()
-        .route("/", get(renderizar_widget))
-        .with_state(state);
-
-    let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    println!("Servidor de acero levantado. Escuchando en el puerto 3000...");
-    axum::serve(listener, app).await.unwrap();
+    run(vercel_runtime::service_fn(handler)).await
 }
