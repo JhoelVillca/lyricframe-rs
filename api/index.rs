@@ -3,6 +3,7 @@ use base64::{engine::general_purpose, Engine as _};
 use color_thief::{get_palette, ColorFormat};
 use reqwest::Client;
 use vercel_runtime::{run, Error, Request, Response};
+use rand::RngExt;
 
 struct Barra {
     altura: u32,
@@ -115,10 +116,6 @@ async fn handler(_req: Request) -> Result<Response<String>, Error> {
         .await?;
 
     let json: serde_json::Value = res.json().await?;
-    println!("DEBUG - SPOTIFY_CLIENT_ID: '{}'", client_id);
-    println!("DEBUG - SPOTIFY_SECRET_ID: '{}'", client_secret);
-    println!("DEBUG - SPOTIFY_REFRESH_TOKEN: '{}'", refresh_token);
-    println!("DEBUG - Spotify Token Response: {}", json);
 
     let token = json["access_token"].as_str().unwrap_or_default();
 
@@ -155,7 +152,16 @@ async fn handler(_req: Request) -> Result<Response<String>, Error> {
         {
             if res.status().as_u16() == 200 {
                 if let Ok(mut json) = res.json::<serde_json::Value>().await {
-                    track_data = json["items"][0]["track"].take();
+                    if let Some(items) = json["items"].as_array_mut() {
+                        if !items.is_empty() {
+                            let mut rng = rand::rng();
+                            let random_index = rng.random_range(0..items.len());
+
+                            track_data = items[random_index]["track"].take();
+                            
+                            is_playing = true; 
+                        }
+                    }
                 }
             }
         }
@@ -209,12 +215,11 @@ async fn handler(_req: Request) -> Result<Response<String>, Error> {
     Ok(Response::builder()
         .status(200)
         .header("Content-Type", "image/svg+xml; charset=utf-8")
-        .header("Cache-Control", "s-maxage=60, stale-while-revalidate=30")
+        .header("Cache-Control", "public, max-age=0, s-maxage=60, stale-while-revalidate=30")
         .body(renderizado)?)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    dotenvy::dotenv().ok();
     run(vercel_runtime::service_fn(handler)).await
 }
