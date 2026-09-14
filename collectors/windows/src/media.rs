@@ -119,6 +119,10 @@ async fn update_media_properties(
             let artist = props.Artist().unwrap_or_default().to_string_lossy();
             let album = props.AlbumTitle().unwrap_or_default().to_string_lossy();
             
+            if artist.trim().to_lowercase().contains("spotify") {
+                return;
+            }
+            
             let mut art_base64 = String::new();
             if let Ok(thumbnail_ref) = props.Thumbnail() {
                 if let Ok(op_stream) = thumbnail_ref.OpenReadAsync() {
