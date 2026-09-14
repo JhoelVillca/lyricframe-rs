@@ -11,10 +11,12 @@ use std::time::Instant;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer, key_extractor::SmartIpKeyExtractor};
 
 use crate::state::{AppState, PlaybackState, get_current_state};
+use crate::cache::{AppCache, get_or_render_svg};
 
 #[derive(Clone)]
 pub struct SharedData {
     pub state: AppState,
+    pub cache: AppCache,
     pub start_time: Instant,
     pub api_key: String,
 }
@@ -52,11 +54,16 @@ async fn health_handler(State(data): State<SharedData>) -> impl IntoResponse {
     (StatusCode::OK, Json(json!({ "status": "nominal", "uptime_sec": uptime })))
 }
 
-async fn root_handler() -> impl IntoResponse {
+async fn root_handler(State(data): State<SharedData>) -> impl IntoResponse {
+    let state_opt = get_current_state(&data.state).await;
+    let svg = get_or_render_svg(&data.cache, state_opt).await;
     (
         StatusCode::OK,
-        [(header::CACHE_CONTROL, "public, max-age=0, s-maxage=60, stale-while-revalidate=30")],
-        "Renderizador SVG pendiente",
+        [
+            (header::CACHE_CONTROL, "public, max-age=0, s-maxage=60, stale-while-revalidate=30"),
+            (header::CONTENT_TYPE, "image/svg+xml"),
+        ],
+        svg,
     )
 }
 
