@@ -1,0 +1,13 @@
+[package]
+name = "lyricframe-centralizer"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tower_governor = "0.4"
+tower = "0.5"
+dotenvy = "0.15"
