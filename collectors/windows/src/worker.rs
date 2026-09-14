@@ -49,7 +49,7 @@ pub struct Worker {
 impl Worker {
     pub fn new(state: Arc<RwLock<PlaybackState>>, notify: Arc<Notify>) -> Self {
         let api_url = env::var("CENTRALIZER_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
-        let api_key = env::var("X-API-Key").unwrap_or_default();
+        let api_key = env::var("X_API_KEY").unwrap_or_default();
         Self { state, notify, api_url, api_key }
     }
 
@@ -58,7 +58,6 @@ impl Worker {
         let target_url = format!("{}/api/update", self.api_url.trim_end_matches('/'));
 
         loop {
-            // Espera hasta 20 segundos, o hasta que sea notificado de un cambio
             tokio::select! {
                 _ = sleep(Duration::from_secs(20)) => {}
                 _ = self.notify.notified() => {}
@@ -66,16 +65,12 @@ impl Worker {
 
             let payload = {
                 let state = self.state.read().await;
-                // Si nunca se ha llenado con una pista válida (track vacío), podríamos omitir el envío,
-                // pero según la especificación, enviamos de todos modos o esperamos a tener datos.
-                // Decidimos enviar solo si track no está vacío.
                 if state.track.is_empty() {
                     continue;
                 }
                 state.clone()
             };
 
-            // Disparo del POST con captura de error para no paniquear
             let res = client
                 .post(&target_url)
                 .header("X-API-Key", &self.api_key)
@@ -83,8 +78,17 @@ impl Worker {
                 .send()
                 .await;
 
-            if let Err(e) = res {
-                eprintln!("Failed to send update: {}", e);
+            match res {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        println!("[OK] Aceptado en boveda: {} - {}", payload.track, payload.artist);
+                    } else {
+                        // Alerta roja: la boveda rechazo el paquete
+                        println!("[ERROR ROJO] Boveda rechazo (HTTP {}): {} - {}", status, payload.track, payload.artist);
+                    }
+                }
+                Err(e) => eprintln!("[FALLA NEGRA] El servidor esta muerto o la red cayo: {}", e),
             }
         }
     }

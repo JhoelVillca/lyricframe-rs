@@ -15,7 +15,6 @@ use windows::Storage::Streams::DataReader;
 use crate::worker::PlaybackState;
 
 pub async fn start_media_listener(state: Arc<RwLock<PlaybackState>>, notify: Arc<Notify>) {
-    // Intentamos obtener el Session Manager (puede fallar si el SO no lo soporta)
     let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
         Ok(op) => match op.get() {
             Ok(m) => m,
@@ -24,26 +23,24 @@ pub async fn start_media_listener(state: Arc<RwLock<PlaybackState>>, notify: Arc
         Err(_) => return,
     };
 
-    // Callback para cuando cambia la sesión activa
     let manager_clone = manager.clone();
     let state_clone = state.clone();
     let notify_clone = notify.clone();
 
+    let handle = tokio::runtime::Handle::current();
     let handler = TypedEventHandler::new(move |_, _| {
         let m = manager_clone.clone();
         let s = state_clone.clone();
         let n = notify_clone.clone();
-        tokio::spawn(async move {
+        handle.spawn(async move {
             update_current_session(&m, s, n).await;
         });
         Ok(())
     });
 
     if let Ok(_) = manager.CurrentSessionChanged(&handler) {
-        // Ejecutamos una vez para el estado inicial
         update_current_session(&manager, state, notify).await;
 
-        // Mantenemos viva la tarea para seguir escuchando
         std::future::pending::<()>().await;
     }
 }
@@ -54,18 +51,16 @@ async fn update_current_session(
     notify: Arc<Notify>,
 ) {
     if let Ok(session) = manager.GetCurrentSession() {
-        // Desuscribirse de sesiones anteriores si fuera necesario requeriría guardar el token,
-        // pero por simplicidad de este recolector, re-leemos el estado en cada cambio de sesión
-        // y nos suscribimos a la sesión actual (en una implementación más compleja habría que limpiar tokens).
         
         let session_clone1 = session.clone();
         let state_clone1 = state.clone();
         let notify_clone1 = notify.clone();
+        let handle1 = tokio::runtime::Handle::current();
         let _ = session.PlaybackInfoChanged(&TypedEventHandler::new(move |_, _| {
             let s = session_clone1.clone();
             let st = state_clone1.clone();
             let n = notify_clone1.clone();
-            tokio::spawn(async move {
+            handle1.spawn(async move {
                 update_playback_info(&s, st, n).await;
             });
             Ok(())
@@ -74,21 +69,20 @@ async fn update_current_session(
         let session_clone2 = session.clone();
         let state_clone2 = state.clone();
         let notify_clone2 = notify.clone();
+        let handle2 = tokio::runtime::Handle::current();
         let _ = session.MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
             let s = session_clone2.clone();
             let st = state_clone2.clone();
             let n = notify_clone2.clone();
-            tokio::spawn(async move {
+            handle2.spawn(async move {
                 update_media_properties(&s, st, n).await;
             });
             Ok(())
         }));
 
-        // Trigger inicial para esta sesión
         update_media_properties(&session, state.clone(), notify.clone()).await;
         update_playback_info(&session, state, notify).await;
     } else {
-        // Si no hay sesión, podríamos reportar que no está reproduciendo.
         let mut w = state.write().await;
         w.is_playing = false;
         w.update_timestamp();
@@ -153,25 +147,19 @@ async fn update_media_properties(
                 w.art_base64 = art_base64;
             }
             w.update_timestamp();
-            // Disparamos evento inmediato al cambiar de canción
             notify.notify_one();
         }
     }
 }
 
-// Procesa la imagen sin causar panics, retornando string vacío en error
 fn process_image(data: &[u8]) -> String {
     match image::load_from_memory(data) {
         Ok(img) => {
             let resized = img.resize_exact(200, 200, FilterType::Lanczos3);
             let mut buf = Cursor::new(Vec::new());
             
-            // Usamos jpeg::JpegEncoder para setear la calidad a 80
             if let Ok(_) = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 80).encode_image(&resized) {
                 let encoded = Base64Standard.encode(buf.into_inner());
-                // Prefijamos con el tipo mime para el lado cliente (o el centralizador se encargará si es necesario)
-                // Según spec, enviamos base64. El centralizador espera string puro o data URI? La spec dice "Carátula JPEG 200x200 q80 en base64"
-                // Dejaremos el prefix data URI standard por seguridad.
                 return format!("data:image/jpeg;base64,{}", encoded);
             }
             String::new()
