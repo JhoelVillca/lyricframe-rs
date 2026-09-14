@@ -1,4 +1,6 @@
 mod api;
+mod cache;
+mod renderer;
 mod state;
 
 use std::env;
@@ -16,6 +18,7 @@ async fn main() {
 
     let shared_data = api::SharedData {
         state: state::new_state(),
+        cache: cache::new_cache(),
         start_time: Instant::now(),
         api_key,
     };
